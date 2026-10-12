@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const morgan = require('morgan');
 const helmet = require('helmet');
 const cors = require('cors');
@@ -11,6 +12,20 @@ const app = express();
 
 app.use(helmet());
 app.use(cors());
+
+// Distributed Tracing: Correlation ID Middleware
+app.use((req, res, next) => {
+    const correlationId = req.headers['x-correlation-id'] || crypto.randomUUID();
+    req.correlationId = correlationId;
+    res.setHeader('x-correlation-id', correlationId);
+
+    const start = Date.now();
+    res.on('finish', () => {
+        const duration = Date.now() - start;
+        console.log(`[TRACING] [${correlationId}] ${req.method} ${req.originalUrl || req.url} - ${res.statusCode} (${duration}ms)`);
+    });
+    next();
+});
 
 const PORT = process.env.PORT || 3005;
 const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://localhost:3001';
@@ -43,6 +58,11 @@ app.use('/authservice', createProxyMiddleware({
     timeout: 5000,
     pathRewrite: { '^/authservice': '' },
     on: {
+        proxyReq: (proxyReq, req) => {
+            if (req.correlationId) {
+                proxyReq.setHeader('x-correlation-id', req.correlationId);
+            }
+        },
         error: proxyErrorHandler
     }
 }));
@@ -54,6 +74,11 @@ app.use('/flightservice', createProxyMiddleware({
     timeout: 5000,
     pathRewrite: { '^/flightservice': '' },
     on: {
+        proxyReq: (proxyReq, req) => {
+            if (req.correlationId) {
+                proxyReq.setHeader('x-correlation-id', req.correlationId);
+            }
+        },
         error: proxyErrorHandler
     }
 }));
@@ -63,7 +88,8 @@ app.use('/bookingservice', async (req, res, next) => {
     try {
         const response = await axios.get(`${AUTH_SERVICE_URL}/api/v1/isauthenticated`, {
             headers: {
-                'x-access-token': req.headers['x-access-token']
+                'x-access-token': req.headers['x-access-token'],
+                'x-correlation-id': req.correlationId
             },
             timeout: 3000
         });
@@ -99,6 +125,9 @@ app.use('/bookingservice', createProxyMiddleware({
     timeout: 5000,
     on: {
         proxyReq: (proxyReq, req) => {
+            if (req.correlationId) {
+                proxyReq.setHeader('x-correlation-id', req.correlationId);
+            }
             if (req.headers['x-user-id']) {
                 proxyReq.setHeader('x-user-id', req.headers['x-user-id']);
             }
@@ -112,6 +141,21 @@ app.get('/health', (req, res) => {
         status: 'UP',
         timestamp: new Date().toISOString(),
         uptime: process.uptime()
+    });
+});
+app.get('/metrics', (req, res) => {
+    const memory = process.memoryUsage();
+    return res.status(200).json({
+        service: 'API_Gateway',
+        status: 'UP',
+        timestamp: new Date().toISOString(),
+        uptimeSeconds: Math.floor(process.uptime()),
+        memory: {
+            rssMb: +(memory.rss / (1024 * 1024)).toFixed(2),
+            heapTotalMb: +(memory.heapTotal / (1024 * 1024)).toFixed(2),
+            heapUsedMb: +(memory.heapUsed / (1024 * 1024)).toFixed(2)
+        },
+        nodeVersion: process.version
     });
 });
 app.get('/home', (req, res) => {
