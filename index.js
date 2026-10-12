@@ -11,7 +11,11 @@ require('dotenv').config();
 const app = express();
 
 app.use(helmet());
-app.use(cors());
+app.use(cors({
+    origin: true,
+    credentials: true,
+    exposedHeaders: ['x-correlation-id', 'x-cache', 'X-Cache']
+}));
 
 // Distributed Tracing: Correlation ID Middleware
 app.use((req, res, next) => {
