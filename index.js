@@ -1,5 +1,7 @@
 const express = require('express');
 const morgan = require('morgan');
+const helmet = require('helmet');
+const cors = require('cors');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const rateLimit = require('express-rate-limit');
 const axios = require('axios');
@@ -7,17 +9,55 @@ require('dotenv').config();
 
 const app = express();
 
+app.use(helmet());
+app.use(cors());
+
 const PORT = process.env.PORT || 3005;
 const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://localhost:3001';
 const BOOKING_SERVICE_URL = process.env.BOOKING_SERVICE_URL || 'http://localhost:3002';
+const FLIGHT_SEARCH_SERVICE_URL = process.env.FLIGHT_SEARCH_SERVICE_URL || 'http://localhost:3000';
 
 const limiter = rateLimit({
 	windowMs: 2 * 60 * 1000,
-	max: 5, 
+	max: 100, 
 })
 
 app.use(morgan('combined'));
 app.use(limiter);
+
+const proxyErrorHandler = (err, req, res) => {
+    console.error('Proxy Error:', err.message);
+    if (!res.headersSent) {
+        res.status(503).json({
+            success: false,
+            message: 'Downstream service unavailable via gateway proxy',
+            err: err.message
+        });
+    }
+};
+
+app.use('/authservice', createProxyMiddleware({
+    target: AUTH_SERVICE_URL,
+    changeOrigin: true,
+    proxyTimeout: 5000,
+    timeout: 5000,
+    pathRewrite: { '^/authservice': '' },
+    on: {
+        error: proxyErrorHandler
+    }
+}));
+
+app.use('/flightservice', createProxyMiddleware({
+    target: FLIGHT_SEARCH_SERVICE_URL,
+    changeOrigin: true,
+    proxyTimeout: 5000,
+    timeout: 5000,
+    pathRewrite: { '^/flightservice': '' },
+    on: {
+        error: proxyErrorHandler
+    }
+}));
+
 app.use('/bookingservice', async (req, res, next) => {
     console.log(req.headers['x-access-token']);
     try {
@@ -62,7 +102,8 @@ app.use('/bookingservice', createProxyMiddleware({
             if (req.headers['x-user-id']) {
                 proxyReq.setHeader('x-user-id', req.headers['x-user-id']);
             }
-        }
+        },
+        error: proxyErrorHandler
     }
 }));
 app.get('/health', (req, res) => {
