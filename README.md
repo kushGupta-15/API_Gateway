@@ -4,10 +4,11 @@
 The **API Gateway Service** serves as the unified entry point and reverse proxy for the Airline Reservation microservices architecture. It decouples client-facing applications from backend microservices, providing traffic control, reverse proxy routing, centralized rate limiting, request logging, and authentication token verification.
 
 ### Key Responsibilities:
-- **Reverse Proxy**: Routes incoming API requests to internal downstream microservices (e.g., Booking Service).
-- **Authentication Gateway**: Intercepts requests destined for protected routes (like `/bookingservice`) and validates user credentials (`x-access-token`) via the **Auth Service** before proxying.
-- **Rate Limiting**: Protects backend services against DoS attacks and traffic spikes using IP-based request throttling (5 requests per 2-minute window by default).
-- **HTTP Access Logging**: Logs all incoming network requests using Morgan for monitoring and auditing.
+- **Reverse Proxy**: Routes incoming API requests to internal downstream microservices (e.g., Booking Service, Flight Search Service, Auth Service).
+- **Authentication Gateway & RBAC**: Intercepts requests destined for protected routes: validates `x-access-token` for booking actions, and enforces strict `ADMIN` role verification for flight schedule and fleet modifications on `/flightservice`.
+- **Identity Context Propagation**: Injects authenticated `x-user-id` and `x-is-admin` headers into downstream service requests.
+- **Dedicated Rate Limiting**: Protects backend services against DoS attacks with global throttling as well as a specialized auth rate limiter (15 requests per 5 minutes) on `/authservice/api/v1/signin`.
+- **HTTP Access Logging & Telemetry**: Logs all incoming network requests and tracks correlation IDs for end-to-end distributed tracing.
 
 ---
 

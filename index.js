@@ -56,6 +56,19 @@ const proxyErrorHandler = (err, req, res) => {
     }
 };
 
+const authLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000, // 5 minute window
+    max: 15, // limit each IP to 15 login requests per window
+    message: {
+        success: false,
+        message: 'Too many authentication attempts from this IP, please try again after 5 minutes.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+app.use('/authservice/api/v1/signin', authLimiter);
+
 app.use('/authservice', createProxyMiddleware({
     target: AUTH_SERVICE_URL,
     changeOrigin: true,
@@ -72,6 +85,66 @@ app.use('/authservice', createProxyMiddleware({
     }
 }));
 
+// Admin RBAC Guard: Protect mutation endpoints on /flightservice
+app.use('/flightservice', async (req, res, next) => {
+    // Allow public read operations (GET) and health/metrics probes
+    if (req.method === 'GET' || req.path === '/health' || req.path === '/metrics') {
+        return next();
+    }
+
+    const token = req.headers['x-access-token'];
+    if (!token) {
+        return res.status(401).json({
+            success: false,
+            message: 'Unauthorized: Authentication token required for flight operations.'
+        });
+    }
+
+    try {
+        const authRes = await axios.get(`${AUTH_SERVICE_URL}/api/v1/isauthenticated`, {
+            headers: {
+                'x-access-token': token,
+                'x-correlation-id': req.correlationId
+            },
+            timeout: 3000
+        });
+
+        if (!authRes.data?.success) {
+            return res.status(401).json({
+                success: false,
+                message: 'Unauthorized: Invalid or expired session token.'
+            });
+        }
+
+        const userId = authRes.data.data;
+        req.headers['x-user-id'] = String(userId);
+
+        const adminRes = await axios.get(`${AUTH_SERVICE_URL}/api/v1/isAdmin?id=${userId}`, {
+            headers: {
+                'x-access-token': token,
+                'x-correlation-id': req.correlationId
+            },
+            timeout: 3000
+        });
+
+        if (adminRes.data?.data === true) {
+            next();
+        } else {
+            return res.status(403).json({
+                success: false,
+                message: 'Forbidden: Admin dispatcher privileges required to modify flight routes or airport hubs.'
+            });
+        }
+    } catch (err) {
+        console.error('[Gateway Admin Guard] Validation error:', err.message);
+        return res.status(403).json({
+            success: false,
+            message: 'Forbidden: Unable to verify administrative dispatch authority.',
+            err: err.message
+        });
+    }
+});
+
 app.use('/flightservice', createProxyMiddleware({
     target: FLIGHT_SEARCH_SERVICE_URL,
     changeOrigin: true,
@@ -82,6 +155,9 @@ app.use('/flightservice', createProxyMiddleware({
         proxyReq: (proxyReq, req) => {
             if (req.correlationId) {
                 proxyReq.setHeader('x-correlation-id', req.correlationId);
+            }
+            if (req.headers['x-user-id']) {
+                proxyReq.setHeader('x-user-id', req.headers['x-user-id']);
             }
         },
         error: proxyErrorHandler
@@ -108,7 +184,6 @@ app.use('/bookingservice', async (req, res, next) => {
     if (req.path === '/health' || req.path === '/metrics') {
         return next();
     }
-    console.log(req.headers['x-access-token']);
     try {
         const response = await axios.get(`${AUTH_SERVICE_URL}/api/v1/isauthenticated`, {
             headers: {
@@ -117,9 +192,17 @@ app.use('/bookingservice', async (req, res, next) => {
             },
             timeout: 3000
         });
-        console.log(response.data);
         if(response.data.success) {
-            req.headers['x-user-id'] = response.data.data;
+            req.headers['x-user-id'] = String(response.data.data);
+            try {
+                const adminCheck = await axios.get(`${AUTH_SERVICE_URL}/api/v1/isAdmin?id=${response.data.data}`, {
+                    headers: { 'x-access-token': req.headers['x-access-token'] },
+                    timeout: 2000
+                });
+                req.headers['x-is-admin'] = adminCheck.data?.data ? 'true' : 'false';
+            } catch (_) {
+                req.headers['x-is-admin'] = 'false';
+            }
             next();
         } else {
             return res.status(401).json({
@@ -141,7 +224,7 @@ app.use('/bookingservice', async (req, res, next) => {
             message: 'Unauthorised'
         });
     }
-})
+});
 app.use('/bookingservice', createProxyMiddleware({
     target: BOOKING_SERVICE_URL,
     changeOrigin: true,
@@ -154,6 +237,9 @@ app.use('/bookingservice', createProxyMiddleware({
             }
             if (req.headers['x-user-id']) {
                 proxyReq.setHeader('x-user-id', req.headers['x-user-id']);
+            }
+            if (req.headers['x-is-admin']) {
+                proxyReq.setHeader('x-is-admin', req.headers['x-is-admin']);
             }
         },
         error: proxyErrorHandler
