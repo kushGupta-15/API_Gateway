@@ -35,6 +35,7 @@ const PORT = process.env.PORT || 3005;
 const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://localhost:3001';
 const BOOKING_SERVICE_URL = process.env.BOOKING_SERVICE_URL || 'http://localhost:3002';
 const FLIGHT_SEARCH_SERVICE_URL = process.env.FLIGHT_SEARCH_SERVICE_URL || 'http://localhost:3000';
+const REMINDER_SERVICE_URL = process.env.REMINDER_SERVICE_URL || 'http://localhost:3004';
 
 const limiter = rateLimit({
 	windowMs: 2 * 60 * 1000,
@@ -87,7 +88,26 @@ app.use('/flightservice', createProxyMiddleware({
     }
 }));
 
+app.use('/reminderservice', createProxyMiddleware({
+    target: REMINDER_SERVICE_URL,
+    changeOrigin: true,
+    proxyTimeout: 5000,
+    timeout: 5000,
+    pathRewrite: { '^/reminderservice': '' },
+    on: {
+        proxyReq: (proxyReq, req) => {
+            if (req.correlationId) {
+                proxyReq.setHeader('x-correlation-id', req.correlationId);
+            }
+        },
+        error: proxyErrorHandler
+    }
+}));
+
 app.use('/bookingservice', async (req, res, next) => {
+    if (req.path === '/health' || req.path === '/metrics') {
+        return next();
+    }
     console.log(req.headers['x-access-token']);
     try {
         const response = await axios.get(`${AUTH_SERVICE_URL}/api/v1/isauthenticated`, {
@@ -139,6 +159,54 @@ app.use('/bookingservice', createProxyMiddleware({
         error: proxyErrorHandler
     }
 }));
+
+app.get('/system/overview', async (req, res) => {
+    const services = [
+        { id: 'gateway', name: 'API Gateway', url: `http://localhost:${PORT}/metrics`, healthUrl: `http://localhost:${PORT}/health`, type: 'gateway' },
+        { id: 'search', name: 'Flight Search Service', url: `${FLIGHT_SEARCH_SERVICE_URL}/metrics`, healthUrl: `${FLIGHT_SEARCH_SERVICE_URL}/health`, type: 'core' },
+        { id: 'auth', name: 'Authentication Service', url: `${AUTH_SERVICE_URL}/metrics`, healthUrl: `${AUTH_SERVICE_URL}/health`, type: 'core' },
+        { id: 'booking', name: 'Booking Service', url: `${BOOKING_SERVICE_URL}/metrics`, healthUrl: `${BOOKING_SERVICE_URL}/health`, type: 'core' },
+        { id: 'reminder', name: 'Reminder Service', url: `${REMINDER_SERVICE_URL}/metrics`, healthUrl: `${REMINDER_SERVICE_URL}/health`, type: 'worker' }
+    ];
+
+    const results = await Promise.allSettled(
+        services.map(async (s) => {
+            const start = Date.now();
+            try {
+                const metricRes = await axios.get(s.url, { timeout: 2500 });
+                let healthData = {};
+                if (s.healthUrl) {
+                    try {
+                        const hRes = await axios.get(s.healthUrl, { timeout: 2500 });
+                        healthData = hRes.data;
+                    } catch (_) {}
+                }
+                return {
+                    ...s,
+                    status: 'UP',
+                    latencyMs: Date.now() - start,
+                    metrics: metricRes.data,
+                    health: healthData
+                };
+            } catch (err) {
+                return {
+                    ...s,
+                    status: 'DOWN',
+                    latencyMs: Date.now() - start,
+                    error: err.message
+                };
+            }
+        })
+    );
+
+    const cluster = results.map(r => r.value || r.reason);
+    return res.status(200).json({
+        clusterStatus: cluster.every(c => c.status === 'UP') ? 'HEALTHY' : 'DEGRADED',
+        timestamp: new Date().toISOString(),
+        correlationId: req.correlationId,
+        services: cluster
+    });
+});
 app.get('/health', (req, res) => {
     return res.status(200).json({
         service: 'API_Gateway',
