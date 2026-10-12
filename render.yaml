@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: skyflow-api-gateway
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: AUTH_SERVICE_URL
+        sync: false
+      - key: BOOKING_SERVICE_URL
+        sync: false
+      - key: FLIGHT_SEARCH_SERVICE_URL
+        sync: false
+      - key: REMINDER_SERVICE_URL
+        sync: false
